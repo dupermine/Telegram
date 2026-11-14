@@ -1,1 +1,449 @@
+name: Modded Telegram Build
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      - name: local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "ndk.dir=$ANDROID_HOME/ndk/27.2.12479018" >> local.properties
+
+      - name: Generate patcher
+        run: |
+          mkdir -p tools
+          cat > tools/apply_mods.py <<'PYEOF'
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+          import re
+          import sys
+          from pathlib import Path
+
+          ROOT = Path.cwd()
+          errors = []
+
+          def ok(msg):   print(f"[OK] {msg}")
+          def fail(msg): errors.append(msg); print(f"\n[FAIL] {msg}")
+
+          CELL_SOURCE = r'''
+          package org.telegram.ui.Cells;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.content.res.ColorStateList;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.RippleDrawable;
+          import android.text.TextUtils;
+          import android.util.Base64;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import org.telegram.messenger.AndroidUtilities;
+          import org.telegram.messenger.ApplicationLoader;
+          import org.telegram.messenger.ImageLocation;
+          import org.telegram.messenger.LocaleController;
+          import org.telegram.messenger.MediaController;
+          import org.telegram.messenger.MessageObject;
+          import org.telegram.messenger.NotificationCenter;
+          import org.telegram.messenger.R;
+          import org.telegram.tgnet.SerializedData;
+          import org.telegram.tgnet.TLRPC;
+          import org.telegram.ui.ActionBar.AlertDialog;
+          import org.telegram.ui.ActionBar.Theme;
+          import org.telegram.ui.Components.BackupImageView;
+          import org.telegram.ui.Components.LayoutHelper;
+
+          public class ProfileMusicCardCell extends FrameLayout implements NotificationCenter.NotificationCenterDelegate {
+
+              private final int currentAccount;
+              private final long dialogId;
+              private final String prefKey;
+
+              private final BackupImageView coverView;
+              private final TextView coverNote;
+              private final TextView titleView;
+              private final TextView artistView;
+              private final TextView playButton;
+
+              private MessageObject pinnedMessage;
+
+              public ProfileMusicCardCell(Context context, int account, long did) {
+                  super(context);
+                  currentAccount = account;
+                  dialogId = did;
+                  prefKey = account + "_" + did;
+
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                  bg.setCornerRadius(AndroidUtilities.dp(16));
+                  setBackground(new RippleDrawable(ColorStateList.valueOf(0x14000000), bg, null));
+                  setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10), AndroidUtilities.dp(12), AndroidUtilities.dp(10));
+
+                  LinearLayout content = new LinearLayout(context);
+                  content.setOrientation(LinearLayout.HORIZONTAL);
+                  content.setGravity(Gravity.CENTER_VERTICAL);
+                  addView(content, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+                  FrameLayout coverContainer = new FrameLayout(context);
+                  content.addView(coverContainer, new LinearLayout.LayoutParams(AndroidUtilities.dp(48), AndroidUtilities.dp(48)));
+
+                  coverView = new BackupImageView(context);
+                  coverView.setRoundRadius(AndroidUtilities.dp(10));
+                  coverContainer.addView(coverView, LayoutHelper.createFrame(48, 48));
+
+                  coverNote = new TextView(context);
+                  coverNote.setText("♪");
+                  coverNote.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 22);
+                  coverNote.setTextColor(Theme.getColor(Theme.key_avatar_text));
+                  coverNote.setGravity(Gravity.CENTER);
+                  coverContainer.addView(coverNote, LayoutHelper.createFrame(48, 48));
+
+                  LinearLayout texts = new LinearLayout(context);
+                  texts.setOrientation(LinearLayout.VERTICAL);
+                  LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(0, LayoutHelper.WRAP_CONTENT, 1f);
+                  textsLp.leftMargin = AndroidUtilities.dp(12);
+                  textsLp.rightMargin = AndroidUtilities.dp(12);
+                  content.addView(texts, textsLp);
+
+                  titleView = new TextView(context);
+                  titleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);
+                  titleView.setTypeface(Typeface.DEFAULT_BOLD);
+                  titleView.setSingleLine(true);
+                  titleView.setEllipsize(TextUtils.TruncateAt.END);
+                  titleView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                  texts.addView(titleView);
+
+                  artistView = new TextView(context);
+                  artistView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
+                  artistView.setSingleLine(true);
+                  artistView.setEllipsize(TextUtils.TruncateAt.END);
+                  artistView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+                  texts.addView(artistView);
+
+                  FrameLayout playWrap = new FrameLayout(context);
+                  content.addView(playWrap, new LinearLayout.LayoutParams(AndroidUtilities.dp(40), AndroidUtilities.dp(40)));
+
+                  GradientDrawable circle = new GradientDrawable();
+                  circle.setShape(GradientDrawable.OVAL);
+                  circle.setColor(Theme.getColor(Theme.key_avatar_backgroundBlue));
+                  playWrap.setBackground(circle);
+
+                  playButton = new TextView(context);
+                  playButton.setText("▶");
+                  playButton.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+                  playButton.setTextColor(0xFFFFFFFF);
+                  playButton.setGravity(Gravity.CENTER);
+                  playWrap.addView(playButton, LayoutHelper.createFrame(40, 40));
+
+                  playWrap.setOnClickListener(v -> togglePlay());
+
+                  setOnLongClickListener(v -> {
+                      showPinDialog();
+                      return true;
+                  });
+                  setOnClickListener(v -> {
+                      if (pinnedMessage != null) {
+                          togglePlay();
+                      } else {
+                          showPinDialog();
+                      }
+                  });
+
+                  loadPinned();
+                  updateViews();
+              }
+
+              private SharedPreferences prefs() {
+                  return ApplicationLoader.applicationContext.getSharedPreferences("profile_music", Context.MODE_PRIVATE);
+              }
+
+              private void loadPinned() {
+                  pinnedMessage = null;
+                  String encoded = prefs().getString(prefKey, null);
+                  if (encoded == null) return;
+                  try {
+                      byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+                      SerializedData data = new SerializedData(bytes);
+                      TLRPC.Message message = TLRPC.Message.TLdeserialize(data, data.readInt32(false), false);
+                      data.cleanup();
+                      if (message != null && message.media instanceof TLRPC.TL_messageMediaDocument && message.media.document != null) {
+                          pinnedMessage = new MessageObject(currentAccount, message, false, false);
+                      }
+                  } catch (Exception e) {
+                      pinnedMessage = null;
+                  }
+              }
+
+              private void pin(MessageObject messageObject) {
+                  if (messageObject == null || messageObject.messageOwner == null) return;
+                  try {
+                      SerializedData data = new SerializedData(messageObject.messageOwner.getObjectSize());
+                      messageObject.messageOwner.serializeToStream(data);
+                      String encoded = Base64.encodeToString(data.toByteArray(), Base64.DEFAULT);
+                      data.cleanup();
+                      prefs().edit().putString(prefKey, encoded).apply();
+                      loadPinned();
+                      updateViews();
+                  } catch (Exception e) {}
+              }
+
+              private void unpin() {
+                  prefs().edit().remove(prefKey).apply();
+                  pinnedMessage = null;
+                  updateViews();
+              }
+
+              private void showPinDialog() {
+                  MessageObject playing = MediaController.getInstance(currentAccount).getPlayingMessageObject();
+                  String[] items = pinnedMessage != null
+                          ? new String[]{
+                              LocaleController.getString(R.string.ProfileMusicUpdate),
+                              LocaleController.getString(R.string.ProfileMusicUnpin)}
+                          : new String[]{LocaleController.getString(R.string.ProfileMusicPin)};
+                  new AlertDialog.Builder(getContext())
+                          .setItems(items, (dialog, which) -> {
+                              if (pinnedMessage != null) {
+                                  if (which == 0) {
+                                      if (playing != null) pin(playing);
+                                  } else {
+                                      unpin();
+                                  }
+                              } else if (playing != null) {
+                                  pin(playing);
+                              }
+                          })
+                          .show();
+              }
+
+              private void togglePlay() {
+                  if (pinnedMessage == null) return;
+                  MediaController controller = MediaController.getInstance(currentAccount);
+                  if (controller.isPlayingMessage(pinnedMessage) && !controller.isMessagePaused()) {
+                      controller.pauseMessage(pinnedMessage);
+                  } else {
+                      controller.playMessage(pinnedMessage);
+                  }
+                  updateViews();
+              }
+
+              private void updateViews() {
+                  TLRPC.Document doc = pinnedMessage != null ? pinnedMessage.getDocument() : null;
+                  if (doc != null) {
+                      String title = null, artist = null;
+                      for (int i = 0; i < doc.attributes.size(); i++) {
+                          TLRPC.DocumentAttribute attr = doc.attributes.get(i);
+                          if (attr instanceof TLRPC.TL_documentAttributeAudio) {
+                              title = attr.title;
+                              artist = attr.performer;
+                              break;
+                          }
+                      }
+                      titleView.setText(!TextUtils.isEmpty(title) ? title
+                              : !TextUtils.isEmpty(doc.file_name) ? doc.file_name : LocaleController.getString(R.string.AttachAudio));
+                      artistView.setText(artist != null ? artist : "");
+                  } else {
+                      titleView.setText("Музыка в профиле");
+                      artistView.setText(LocaleController.getString(R.string.ProfileMusicEmpty));
+                  }
+
+                  boolean playing = pinnedMessage != null
+                          && MediaController.getInstance(currentAccount).isPlayingMessage(pinnedMessage)
+                          && !MediaController.getInstance(currentAccount).isMessagePaused();
+                  playButton.setText(playing ? "⏸" : "▶");
+
+                  if (doc != null && doc.thumbs != null && !doc.thumbs.isEmpty()) {
+                      TLRPC.PhotoSize thumb = doc.thumbs.get(doc.thumbs.size() - 1);
+                      coverView.getImageReceiver().setImage(ImageLocation.getForDocument(thumb, doc), "80_80", null, pinnedMessage);
+                      coverNote.setVisibility(View.GONE);
+                  } else {
+                      coverView.getImageReceiver().clearImage();
+                      coverNote.setVisibility(doc != null ? View.VISIBLE : View.GONE);
+                  }
+              }
+
+              @Override
+              protected void onAttachedToWindow() {
+                  super.onAttachedToWindow();
+                  NotificationCenter.getInstance(currentAccount).addObserver(this,
+                          NotificationCenter.messagePlayingDidStart,
+                          NotificationCenter.messagePlayingDidReset,
+                          NotificationCenter.messagePlayingPlayStateChanged);
+                  updateViews();
+              }
+
+              @Override
+              protected void onDetachedFromWindow() {
+                  super.onDetachedFromWindow();
+                  NotificationCenter.getInstance(currentAccount).removeObserver(this,
+                          NotificationCenter.messagePlayingDidStart,
+                          NotificationCenter.messagePlayingDidReset,
+                          NotificationCenter.messagePlayingPlayStateChanged);
+              }
+
+              @Override
+              public void didReceivedNotification(int id, int account, Object... args) {
+                  updateViews();
+              }
+          }
+          '''
+
+          MUSIC_SNIPPET = '''
+                  // === PROFILE MUSIC CARD (mod) ===
+                  if (dialog_id > 0) {
+                      profileMusicCard = new ProfileMusicCardCell(context, currentAccount, dialog_id);
+                      FrameLayout.LayoutParams musicCardLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                      musicCardLp.gravity = Gravity.BOTTOM;
+                      musicCardLp.leftMargin = AndroidUtilities.dp(12);
+                      musicCardLp.rightMargin = AndroidUtilities.dp(12);
+                      musicCardLp.bottomMargin = AndroidUtilities.dp(12);
+                      ((ViewGroup) fragmentView).addView(profileMusicCard, musicCardLp);
+                  }
+                  // === END PROFILE MUSIC CARD ===
+
+          '''
+
+          def dump_profile_context(src):
+              print("\n----- контекст ProfileActivity (строки с username) -----")
+              for i, line in enumerate(src.splitlines(), 1):
+                  if "username" in line and ("=" in line or "setValue" in line):
+                      print(f"  {i}: {line.strip()[:160]}")
+              print("----------------------------------------------------------\n")
+
+          # 1. Лимит аккаунтов
+          uc = ROOT / "TMessagesProj/src/main/java/org/telegram/messenger/UserConfig.java"
+          src = uc.read_text(encoding="utf-8")
+          src, n1 = re.subn(r"MAX_ACCOUNT_DEFAULT_COUNT = 3;", "MAX_ACCOUNT_DEFAULT_COUNT = 32;", src)
+          src, n2 = re.subn(r"MAX_ACCOUNT_COUNT = 4;", "MAX_ACCOUNT_COUNT = 32;", src)
+          src, n3 = re.subn(r"return hasPremiumOnAccounts\(\) \? 5 : 3;", "return MAX_ACCOUNT_COUNT;", src)
+          if n1 and n2 and n3:
+              uc.write_text(src, encoding="utf-8")
+              ok("UserConfig: лимит аккаунтов снят (32 вместо 3/4/5)")
+          else:
+              fail(f"UserConfig: замены не сработали полностью ({n1},{n2},{n3}) — файл мог измениться")
+
+          # 2. Строки
+          sx = ROOT / "TMessagesProj/src/main/res/values/strings.xml"
+          s = sx.read_text(encoding="utf-8")
+          if "ProfileMusicPin" not in s:
+              block = (
+                  '    <string name="ProfileMusicEmpty">Воспроизведите трек, затем удерживайте карточку и закрепите его</string>\n'
+                  '    <string name="ProfileMusicPin">Закрепить текущий трек</string>\n'
+                  '    <string name="ProfileMusicUnpin">Открепить трек</string>\n'
+                  '    <string name="ProfileMusicUpdate">Обновить трек (текущий играющий)</string>\n'
+              )
+              s = s.replace("</resources>", block + "</resources>", 1)
+              sx.write_text(s, encoding="utf-8")
+          ok("strings.xml: строки карточки добавлены")
+
+          # 3. Файл карточки
+          cells_dir = ROOT / "TMessagesProj/src/main/java/org/telegram/ui/Cells"
+          cells_dir.mkdir(parents=True, exist_ok=True)
+          (cells_dir / "ProfileMusicCardCell.java").write_text(CELL_SOURCE, encoding="utf-8")
+          ok("ProfileMusicCardCell.java создан")
+
+          # 4. ProfileActivity
+          pa = ROOT / "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
+          src = pa.read_text(encoding="utf-8")
+
+          if "import org.telegram.ui.Cells.ProfileMusicCardCell;" not in src:
+              m = re.search(r"\nimport org\.telegram\.ui\.Cells\.\w+;", src)
+              if m:
+                  src = src[:m.start()] + "\nimport org.telegram.ui.Cells.ProfileMusicCardCell;" + src[m.start():]
+                  ok("ProfileActivity: import добавлен")
+              else:
+                  fail("ProfileActivity: не найден блок import org.telegram.ui.Cells.*")
+
+          if "profileMusicCard" not in src:
+              inserted = False
+              for anchor in ["    private RecyclerListView listView;", "    public View createView(Context context) {"]:
+                  i = src.find(anchor)
+                  if i != -1:
+                      src = src[:i] + "    private ProfileMusicCardCell profileMusicCard;\n\n" + src[i:]
+                      inserted = True
+                      break
+              if inserted:
+                  ok("ProfileActivity: поле profileMusicCard добавлено")
+              else:
+                  fail("ProfileActivity: anchor для объявления поля не найден")
+
+          if "PROFILE MUSIC CARD (mod)" not in src:
+              m = re.search(r"public View createView\(Context context\) \{", src)
+              r = src.find("return fragmentView;", m.end()) if m else -1
+              if m and r != -1:
+                  src = src[:r] + MUSIC_SNIPPET + src[r:]
+                  ok("ProfileActivity: карточка музыки вставлена в createView")
+              else:
+                  fail("ProfileActivity: createView / 'return fragmentView;' не найдены")
+
+          counter = [0]
+
+          def repl_id(m):
+              counter[0] += 1
+              return m.group(1) + ' + "  ·  id" + ' + m.group(2) + ".id;"
+
+          src = re.sub(r'(\bString\s+\w+\s*=\s*"@"\s*\+\s*(user|chat)\.username)\s*;', repl_id, src)
+
+          if counter[0] == 0:
+              def repl_pu(pair):
+                  counter[0] += 1
+                  var, obj = pair
+                  return (f'{var};\nif ({var} != null) {var} += "  ·  id" + {obj}.id; else {var} = "id" + {obj}.id;')
+              src = re.sub(r'\b(String\s+\w+)\s*=\s*(?:UserObject\.getPublicUsername\((user|chat)\))\s*;',
+                           lambda m: repl_pu((m.group(1), m.group(2))), src)
+
+          if counter[0] > 0:
+              ok(f"ProfileActivity: ID добавлен в юзернейм ({counter[0]} мест)")
+          else:
+              fail("ProfileActivity: не найден код отображения юзернейма для добавления ID")
+
+          if errors:
+              dump_profile_context(src)
+              print("Есть ошибки — ProfileActivity.java НЕ изменён.")
+              sys.exit(1)
+
+          pa.write_text(src, encoding="utf-8")
+          print("\nВсе моды применены.")
+          PYEOF
+
+      - name: Apply mods
+        run: python3 tools/apply_mods.py
+
+      - name: Build APK
+        run: chmod +x gradlew && ./gradlew :TMessagesProj:assembleAfatRelease --stacktrace
+        env:
+          GRADLE_OPTS: -Xmx6g
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-modded-apk
+          path: TMessagesProj/build/outputs/apk/afat/release/*.apk
+          if-no-files-found: ignore
